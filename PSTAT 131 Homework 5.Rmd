@@ -1,0 +1,186 @@
+---
+title: "PSTAT 131 Homework 5"
+author: "Tammy Truong"
+date: '2022-05-15'
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidymodels)
+library(ISLR)
+library(tidyverse)
+tidymodels_prefer()
+library(ggplot2)
+library(glmnet)
+library(dplyr)
+```
+
+```{r}
+pokemon <- read_csv("Pokemon.csv")
+```
+# Elastic Net Tuning
+
+## Question 1
+
+We install and use `janitor` to utilize the function `clean_names()` to standardize the dataset.
+
+```{r}
+library(janitor)
+
+pokemon <- clean_names(pokemon)
+```
+
+After using the `clean_names()` function, the data has changed the variables to lowercase and have added under scores such as "Type.1" to "type_1." This function is useful because it helps us to easily identify variables and standardize the whole data set.
+
+\newpage
+
+## Question 2
+
+Using the entire data set, we create a bar chart of the outcome variable, `type_1`.
+
+```{r, fig.width = 6, fig.height=3, fig.cap = ""}
+pokemon %>% 
+  ggplot(aes(y = type_1)) +
+  geom_bar()
+```
+
+From the above results, there are 18 classes of the outcome. We see that there are very few flying type Pokemons.
+
+We now filter the data set to contain only Pokemon whose `type_1` is Bug, Fire, Grass, Normal, Water, or Psychic.
+
+```{r}
+pokemon <- pokemon %>%
+  filter(type_1 == "Bug" |
+           type_1 == "Fire" |
+           type_1 == "Grass" |
+           type_1 == "Normal" |
+           type_1 == "Water" |
+           type_1 == "Psychic")
+``` 
+
+After filtering, convert `type_1` and `legendary` to factors.
+```{r}
+pokemon $ type_1 <- as.factor(pokemon $ type_1)
+pokemon $ legendary <- as.factor(pokemon $ legendary)
+pokemon $ generation <- as.factor(pokemon $ generation) # TA's recommendation
+```
+
+\newpage
+## Question 3
+
+Performing an initial split of the data and stratifying by the outcome variable.
+
+```{r}
+set.seed(1004)
+pokemon_split <- initial_split(pokemon, prop = 0.80, strata = type_1)
+pokemon_train <- training(pokemon_split)
+pokemon_test <- testing(pokemon_split)
+
+# verifying training and testing sets with desired number of obs.
+nrow(pokemon_train)
+nrow(pokemon_test)
+```
+
+Next, use *v*-fold cross-validation on the training set. Use 5 folds. Stratify the folds by `type_1` as well. *Hint: Look for a `strata` argument.* Why might stratifying the folds be useful?
+
+```{r}
+pokemon_folds <- vfold_cv(pokemon_train, v = 5, strata = type_1)
+pokemon_folds
+```
+
+Stratifying the folds may be useful because it helps the same ratios be consistent throughout each fold.
+
+## Question 4
+
+Setting up a recipe to predict `type_1` with `legendary`, `generation`, `sp_atk`, `attack`, `speed`, `defense`, `hp`, and `sp_def`, including:
+
+- Dummy-code `legendary` and `generation`;
+
+- Center and scale all predictors.
+```{r}
+pokemon_recipe <- recipe(type_1 ~ legendary + generation + sp_atk + attack + speed + defense + hp + sp_def, data = pokemon_train) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_center(all_predictors()) %>%
+  step_scale(all_predictors())
+```
+
+\newpage
+## Question 5
+
+We'll be fitting and tuning an elastic net, tuning `penalty` and `mixture` (use `multinom_reg` with the `glmnet` engine).
+
+We set up this model and workflow by creating a regular grid for `penalty` and `mixture` with 10 levels each; `mixture` should range from 0 to 1. We'll let `penalty` range from -5 to 5 (it's log-scaled).
+
+```{r}
+pokemon_elastic <- multinom_reg(penalty = tune(), mixture = tune()) %>%
+  set_engine("glmnet")
+
+pokemon_wkflow <- workflow() %>%
+  add_model(pokemon_elastic) %>%
+  add_recipe(pokemon_recipe)
+
+pokemon_grid <- grid_regular(penalty(range = c(-5, 5)), mixture(range = c(0, 1)), levels = 10)
+```
+
+When we fit these models to the folded data, we have 100 models per fold, so a total of 500 models. 
+
+
+## Question 6
+
+Fit the models to the folded data using `tune_grid()`.
+
+```{r}
+tune_pokemon <- tune_grid(pokemon_wkflow, 
+                          resamples = pokemon_folds,
+                          grid = pokemon_grid)
+```
+
+We use `autoplot()` to check the results.
+
+```{r}
+autoplot(tune_pokemon)
+```
+
+From the plot above, we notice that smaller values of penalty and mixture lead to a better accuracy and ROC AUC.
+
+## Question 7
+
+Using `select_best()` to choose the model that has the optimal `roc_auc`. Then we use `finalize_workflow()`, `fit()`, and `augment()` to fit the model to the training set and evaluate its performance on the testing set.
+
+```{r}
+pokemon_best <- select_best(tune_pokemon, metric = "roc_auc")
+pokemon_best
+```
+```{r}
+final_wkflow <- pokemon_wkflow %>%
+  finalize_workflow(pokemon_best) %>%
+  fit(pokemon_train) %>%
+  augment(pokemon_test)
+
+accuracy(final_wkflow, truth = type_1, estimate = .pred_class)
+```
+
+## Question 8
+
+Calculating the overall ROC AUC on the testing set.
+
+```{r}
+roc_auc(final_wkflow, truth = type_1, estimate = c(.pred_Bug, .pred_Fire, .pred_Grass, .pred_Normal, .pred_Psychic, .pred_Water))
+```
+
+*Plots of the different ROC curves, one per level of the outcome*
+
+```{r, fig.width = 6, fig.height=3, fig.cap = ""}
+autoplot(roc_curve(final_wkflow, truth = type_1, .pred_Bug, .pred_Fire, 
+                   .pred_Grass, .pred_Normal, .pred_Psychic, .pred_Water))
+```
+
+*Heat map of the confusion matrix*
+
+```{r, fig.width = 6, fig.height=3, fig.cap = ""}
+conf_mat(final_wkflow, truth = type_1, estimate = .pred_class) %>%
+  autoplot(type = "heatmap")
+```
+
+Based on the results above, I notice that the overall ROC AUC yields an approximation of 0.7400513. When looking at the plots, there were some that were performed well, such as Psychic, Normal, and Bug. The model does not perform well for Grass and Water. When we look at the heat map of the confusion matrix, Normal and Water a had high positive counts of 13 for both. However, many performed poorly. Variables such as Fire and Grass only had a count of 1. Overall, I don't believe the model performed well.
